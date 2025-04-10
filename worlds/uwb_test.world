@@ -1,0 +1,53 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="uwb_test_world">
+    <include>
+      <uri>model://sun</uri>
+    </include>
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <!-- Anchor 0 -->
+    <include>
+      <uri>model://uwb_anchor0</uri>
+      <pose>0 0 1.0 0 0 0</pose>
+    </include>
+
+    <!-- UWB Tag -->
+    <model name="uwb_tag0">
+      <pose>5 0 1.0 0 0 0</pose>
+      <static>false</static>
+      <link name="link">
+
+        <!-- ✅ 加上 collision -->
+        <collision name="collision">
+          <geometry>
+            <sphere><radius>0.15</radius></sphere>
+          </geometry>
+        </collision>
+
+        <!-- 視覺化仍保留 -->
+        <visual name="visual">
+          <geometry>
+            <sphere><radius>0.15</radius></sphere>
+          </geometry>
+          <material>
+            <ambient>0 1 0 1</ambient>
+            <diffuse>0 1 0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+
+      <plugin name="gtec_uwb_plugin" filename="libgtec_uwb_plugin.so">
+        <update_rate>25</update_rate>
+        <nlosSoftWallWidth>0.25</nlosSoftWallWidth>
+        <tag_z_offset>1.0</tag_z_offset>
+        <tag_link>link</tag_link>
+        <anchor_prefix>uwb_anchor</anchor_prefix>
+        <all_los>true</all_los>
+        <tag_id>0</tag_id>
+      </plugin>
+    </model>
+  </world>
+</sdf>

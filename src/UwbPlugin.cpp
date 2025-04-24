@@ -658,14 +658,15 @@ namespace gazebo
             this->model = _parent;
             this->world = _parent->GetWorld();
             this->SetUpdateRate(_sdf->Get<double>("update_rate"));
+
+            // 預設參數
             this->nlosSoftWallWidth = 0.25;
             this->tagZOffset = 0;
             this->tagId = 0;
-            this->maxDBDistance = 14;
+            this->maxDBDistance = 14;  // 超過此距離不量測
             this->stepDBDistance = 0.1;
             this->allBeaconsAreLOS = false;
             this->useParentAsReference = false;
-
 
             if (_sdf->HasElement("all_los"))
             {
@@ -675,6 +676,34 @@ namespace gazebo
             if (_sdf->HasElement("tag_id"))
             {
                 this->tagId = _sdf->Get<double>("tag_id");
+            }
+            else
+            {
+                // 若未指定, 從模型名稱自動取數字當作 ID
+                std::string modelName = _parent->GetName();  // e.g., uwb_tag_123
+                std::string digits;
+                for (char c : modelName)
+                {
+                    if (isdigit(c)) digits += c;
+                }
+                if (!digits.empty())
+                {
+                    try
+                    {
+                        this->tagId = std::stoi(digits);
+                        ROS_INFO("Auto-extracted tag_id=%d from model name: %s", this->tagId, modelName.c_str());
+                    }
+                    catch (const std::exception &e)
+                    {
+                        ROS_WARN("Failed to extract tag ID from model name: %s", modelName.c_str());
+                        this->tagId = 0;  // fallback
+                    }
+                }
+                else
+                {
+                    ROS_WARN("No digits found in model name: %s, defaulting tag_id to 0", modelName.c_str());
+                    this->tagId = 0;
+                }
             }
 
             if (_sdf->HasElement("tag_z_offset"))
@@ -696,7 +725,7 @@ namespace gazebo
                 if (this->tagLink == NULL)
                 {
                     std::vector<physics::LinkPtr> links = _parent->GetLinks();
-                    for (int i = 0; i < links.size(); ++i)
+                    for (int i = 0; i < (int)links.size(); ++i)
                     {
                         ROS_INFO("Link[%d]: %s", i, links[i]->GetName().c_str());
                     }
@@ -720,14 +749,9 @@ namespace gazebo
             this->lastUpdateTime = common::Time(0.0);
 
             std::string topicRanging = "/gtec/toa/ranging";
-
             ROS_INFO("GTEC UWB Plugin Ranging Publishing in %s", topicRanging.c_str());
 
-/*            stringStream.str("");
-            stringStream.clear();
-            stringStream << "/gtec/toa/anchors" << this->tagId;*/
             std::string topicAnchors = "/gtec/toa/anchors";
-
             ROS_INFO("GTEC UWB Plugin Anchors Position Publishing in %s", topicAnchors.c_str());
 
             ros::NodeHandle n;
@@ -735,10 +759,10 @@ namespace gazebo
             this->gtecAnchors = n.advertise<visualization_msgs::MarkerArray>(topicAnchors, 1000);
 
             this->firstRay = boost::dynamic_pointer_cast<physics::RayShape>(
-                                 this->world->Physics()->CreateShape("ray", physics::CollisionPtr()));
+                this->world->Physics()->CreateShape("ray", physics::CollisionPtr()));
 
             this->secondRay = boost::dynamic_pointer_cast<physics::RayShape>(
-                                  this->world->Physics()->CreateShape("ray", physics::CollisionPtr()));
+                this->world->Physics()->CreateShape("ray", physics::CollisionPtr()));
 
             this->updateConnection =
                 event::Events::ConnectWorldUpdateBegin(boost::bind(&UwbPlugin::OnUpdate, this, _1));
@@ -753,9 +777,7 @@ namespace gazebo
             {
                 this->lastUpdateTime = _info.simTime;
 
-
                 ignition::math::Pose3d tagPose;
-
                 if (!this->useParentAsReference)
                 {
                     tagPose = this->tagLink->WorldPose();
@@ -765,10 +787,15 @@ namespace gazebo
                     tagPose = this->model->WorldPose();
                 }
 
-                ignition::math::Vector3d posCorrectedZ(tagPose.Pos().X(), tagPose.Pos().Y(), tagPose.Pos().Z() + this->tagZOffset);
+                // 加上 tagZOffset
+                ignition::math::Vector3d posCorrectedZ(
+                    tagPose.Pos().X(),
+                    tagPose.Pos().Y(),
+                    tagPose.Pos().Z() + this->tagZOffset);
                 tagPose.Set(posCorrectedZ, tagPose.Rot());
                 ignition::math::Vector3d currentTagPose(tagPose.Pos());
 
+                // 取得標的(機器)當前 yaw，用於反射搜尋
                 tf::Quaternion q(tagPose.Rot().X(),
                                  tagPose.Rot().Y(),
                                  tagPose.Rot().Z(),
@@ -778,13 +805,7 @@ namespace gazebo
                 double roll, pitch, currentYaw;
                 m.getRPY(roll, pitch, currentYaw);
 
-                // if (currentYaw < 0)
-                // {
-                //     currentYaw = 2 * M_PI + currentYaw;
-                // }
-
                 double startAngle = currentYaw;
-                double currentAngle = 0;
                 double arc = 3 * M_PI / 2;
                 int numAnglesToTestBySide = 30;
                 double incrementAngle = arc / numAnglesToTestBySide;
@@ -798,121 +819,201 @@ namespace gazebo
                     if (i % 2 == 0)
                     {
                         angleToTest = startAngle - (i / 2) * incrementAngle;
-                        // if (angleToTest < 0)
-                        // {
-                        //     angleToTest = 2 * M_PI + angleToTest;
-                        // }
                     }
                     else
                     {
                         angleToTest = startAngle + (i - (i - 1) / 2) * incrementAngle;
-                        // if (angleToTest > 2 * M_PI)
-                        // {
-                        //     angleToTest = angleToTest - 2 * M_PI;
-                        // }
                     }
                     anglesToTest[i] = angleToTest;
                 }
 
                 visualization_msgs::MarkerArray markerArray;
-                visualization_msgs::MarkerArray interferencesArray;
 
+                // 找出所有 anchor
                 physics::Model_V models = this->world->Models();
-                for (physics::Model_V::iterator iter = models.begin(); iter != models.end(); ++iter)
+                for (auto &anchor : models)
                 {
-
-                    if ((*iter)->GetName().find(this->anchorPrefix) == 0)
+                    if (anchor->GetName().find(this->anchorPrefix) == 0)
                     {
-                        physics::ModelPtr anchor = *iter;
+                        // 先萃取 anchor ID
                         std::string aidStr = anchor->GetName().substr(this->anchorPrefix.length());
-                        int aid = std::stoi(aidStr);
+                        int aid = -1;
+                        {
+                            std::string digits;
+                            for (char c : aidStr)
+                            {
+                                if (isdigit(c)) digits += c;
+                            }
+                            if (!digits.empty())
+                            {
+                                try
+                                {
+                                    aid = std::stoi(digits);
+                                }
+                                catch (const std::exception &e)
+                                {
+                                    ROS_WARN("Failed to parse anchor ID from '%s' : %s", aidStr.c_str(), e.what());
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                ROS_WARN("No digits found in anchor name suffix: '%s'", aidStr.c_str());
+                                continue;
+                            }
+                        }
+
+                        // Anchor 的世界座標
                         ignition::math::Pose3d anchorPose = anchor->WorldPose();
 
+                        // LOS/NLOS 判斷開始
                         LOSType losType = LOS;
                         double distance = tagPose.Pos().Distance(anchorPose.Pos());
                         double distanceAfterRebounds = 0;
 
+                        // 如果沒有強制全部LOS
                         if (!allBeaconsAreLOS)
                         {
-                            //We check if a ray can reach the anchor:
                             double distanceToObstacleFromTag;
                             std::string obstacleName;
 
-                            ignition::math::Vector3d directionToAnchor = (anchorPose.Pos() - tagPose.Pos()).Normalize();
+                            // 取得原始起點與終點
+                            ignition::math::Vector3d start = tagPose.Pos();     // Tag 中心
+                            ignition::math::Vector3d end = anchorPose.Pos();    // Anchor 中心
+                            ignition::math::Vector3d direction = (end - start).Normalize();
+
+                            const double minOffsetDistance = 0.5;  // 起點偏移 0.5 公尺
+                            ignition::math::Vector3d offsetStart = start + direction * minOffsetDistance;
+
+                            // 第一道射線: Tag → Anchor（略微偏移起點，避免誤射自己）
                             this->firstRay->Reset();
-                            this->firstRay->SetPoints(tagPose.Pos(), anchorPose.Pos());
+                            this->firstRay->SetPoints(offsetStart, end);
                             this->firstRay->GetIntersection(distanceToObstacleFromTag, obstacleName);
 
-                            if (obstacleName.compare("") == 0)
+                            // 加回偏移距離，得到真正從 tag 中心到障礙物的距離
+                            double fullDistanceToObstacleFromTag = (offsetStart - start).Length() + distanceToObstacleFromTag;
+
+                            if (obstacleName.empty())
                             {
-                                //There is no obstacle between anchor and tag, we use the LOS model
                                 losType = LOS;
                                 distanceAfterRebounds = distance;
+                                ROS_INFO_NAMED("uwb_plugin",
+                                    "[Tag:%d Anchor:%d - %s] => LOS : No obstacle detected",
+                                    this->tagId, aid, anchor->GetName().c_str());
                             }
                             else
                             {
-
-                                //We use a second ray to measure the distance from anchor to tag, so we can
-                                //know what is the width of the walls
                                 double distanceToObstacleFromAnchor;
                                 std::string otherObstacleName;
 
+                                // 第二道射線：Anchor → Tag，同樣略微偏移終點
+                                ignition::math::Vector3d reverseDirection = (start - end).Normalize();
+                                ignition::math::Vector3d offsetEnd = end + reverseDirection * minOffsetDistance;
+
                                 this->secondRay->Reset();
-                                this->secondRay->SetPoints(anchorPose.Pos(), tagPose.Pos());
+                                this->secondRay->SetPoints(offsetEnd, start);
                                 this->secondRay->GetIntersection(distanceToObstacleFromAnchor, otherObstacleName);
 
-                                double wallWidth = distance - distanceToObstacleFromTag - distanceToObstacleFromAnchor;
+                                // 同樣補回偏移距離，得出完整距離
+                                double fullDistanceToObstacleFromAnchor = (offsetEnd - end).Length() + distanceToObstacleFromAnchor;
 
-                                if (wallWidth <= this->nlosSoftWallWidth && obstacleName.compare(otherObstacleName) == 0)
+                                // 牆壁厚度估算：總距離扣掉兩側射線距離
+                                double wallWidth = distance - fullDistanceToObstacleFromTag - fullDistanceToObstacleFromAnchor;
+
+                                if (wallWidth <= this->nlosSoftWallWidth &&
+                                    obstacleName == otherObstacleName)
                                 {
-                                    //We use NLOS - SOFT model
                                     losType = NLOS_S;
                                     distanceAfterRebounds = distance;
+                                    ROS_INFO_NAMED("uwb_plugin",
+                                        "[Tag:%d Anchor:%d - %s] => NLOS_S : Obstacle thickness=%.3f <= softWall=%.3f",
+                                        this->tagId, aid, anchor->GetName().c_str(),
+                                        wallWidth, this->nlosSoftWallWidth);
                                 }
+                            // double distanceToObstacleFromTag;
+                            // std::string obstacleName;
+
+                            // // 第一道射線: Tag→Anchor
+                            // this->firstRay->Reset();
+                            // this->firstRay->SetPoints(tagPose.Pos(), anchorPose.Pos());
+                            // this->firstRay->GetIntersection(distanceToObstacleFromTag, obstacleName);
+
+                            // if (obstacleName.compare("") == 0)
+                            // {
+                            //     losType = LOS;
+                            //     distanceAfterRebounds = distance;
+                            //     ROS_INFO_NAMED("uwb_plugin",
+                            //                    "[Tag:%d Anchor:%d - %s] => LOS : No obstacle detected",
+                            //                    this->tagId, aid, anchor->GetName().c_str());
+                            // }
+                            // else
+                            // {
+                            //     // 第二道射線: Anchor→Tag，以判斷牆厚
+                            //     double distanceToObstacleFromAnchor;
+                            //     std::string otherObstacleName;
+
+                            //     this->secondRay->Reset();
+                            //     this->secondRay->SetPoints(anchorPose.Pos(), tagPose.Pos());
+                            //     this->secondRay->GetIntersection(distanceToObstacleFromAnchor, otherObstacleName);
+
+                            //     double wallWidth = distance - distanceToObstacleFromTag - distanceToObstacleFromAnchor;
+
+                            //     if (wallWidth <= this->nlosSoftWallWidth &&
+                            //         obstacleName.compare(otherObstacleName) == 0)
+                            //     {
+                            //         losType = NLOS_S;
+                            //         distanceAfterRebounds = distance;
+                            //         ROS_INFO_NAMED("uwb_plugin",
+                            //                        "[Tag:%d Anchor:%d - %s] => NLOS_S : Obstacle thickness=%.3f <= softWall=%.3f",
+                            //                        this->tagId, aid, anchor->GetName().c_str(),
+                            //                        wallWidth, this->nlosSoftWallWidth);
+                            //     }
                                 else
                                 {
-                                    //We try to find a rebound to reach the anchor from the tag
+                                    // === 新增：印出更多資訊 ===   //debug point
+                                    ROS_INFO_NAMED("uwb_plugin",
+                                                    "[Tag:%d Anchor:%d - %s] => NLOS Judgment Failed => Obstacle thickness=%.3f > softWall=%.3f\n"
+                                                    "    obstacleName (from Tag)    = '%s'\n"
+                                                    "    otherObstacleName (from Anchor) = '%s'",
+                                                    this->tagId, aid, anchor->GetName().c_str(),
+                                                    wallWidth, this->nlosSoftWallWidth,
+                                                    obstacleName.c_str(), otherObstacleName.c_str());
+                                                    
+                                    // 嘗試做 NLOS_H (反射)
                                     bool end = false;
-
+                                    bool foundNlosH = false;
+                                    double distanceNlosHard = 0;   // 最短反射路徑
                                     double maxDistance = 30;
                                     double distanceToRebound = 0;
                                     double distanceToFinalObstacle = 0;
-                                    double distanceNlosHard = 0;
+                                    std::string finalObstacleName;
 
+                                    int indexRay = 0;
+                                    int currentFloorDistance = 0;
                                     double stepFloor = 1;
                                     double startFloorDistanceCheck = 2;
                                     int numStepsFloor = 6;
 
-
-                                    std::string finalObstacleName;
-                                    int indexRay = 0;
-                                    bool foundNlosH = false;
-
-                                    int currentFloorDistance = 0;
-
                                     while (!end)
                                     {
-
-                                        currentAngle = anglesToTest[indexRay];
-
-
+                                        double currentAngle = anglesToTest[indexRay];
                                         double x = currentTagPose.X() + maxDistance * cos(currentAngle);
                                         double y = currentTagPose.Y() + maxDistance * sin(currentAngle);
                                         double z = currentTagPose.Z();
 
-                                        if (currentFloorDistance>0){
-                                          double tanAngleFloor = (startFloorDistanceCheck + stepFloor*(currentFloorDistance-1))/currentTagPose.Z();
-                                          double angleFloor = atan(tanAngleFloor);
+                                        // 嘗試地面彈跳
+                                        if (currentFloorDistance > 0)
+                                        {
+                                            double tanAngleFloor = (startFloorDistanceCheck +
+                                                                    stepFloor * (currentFloorDistance - 1))
+                                                                   / currentTagPose.Z();
+                                            double angleFloor = atan(tanAngleFloor);
+                                            double h = sin(angleFloor) * maxDistance;
+                                            double horizontalDistance = sqrt(maxDistance*maxDistance - h*h);
 
-                                          double h = sin(angleFloor)*maxDistance;
-
-                                          double horizontalDistance = sqrt(maxDistance*maxDistance - h*h);
-
-                                          x = currentTagPose.X() + horizontalDistance * cos(currentAngle);
-                                          y = currentTagPose.Y() + horizontalDistance * sin(currentAngle);
-
-                                          z = -1*(h - currentTagPose.Z());
-
+                                            x = currentTagPose.X() + horizontalDistance * cos(currentAngle);
+                                            y = currentTagPose.Y() + horizontalDistance * sin(currentAngle);
+                                            z = -1 * (h - currentTagPose.Z());
                                         }
 
                                         ignition::math::Vector3d rayPoint(x, y, z);
@@ -923,141 +1024,158 @@ namespace gazebo
 
                                         if (obstacleName.compare("") != 0)
                                         {
-                                            ignition::math::Vector3d collisionPoint(currentTagPose.X() + distanceToRebound * cos(currentAngle), currentTagPose.Y() + distanceToRebound * sin(currentAngle), currentTagPose.Z());
+                                            ignition::math::Vector3d collisionPoint(
+                                                currentTagPose.X() + distanceToRebound * cos(currentAngle),
+                                                currentTagPose.Y() + distanceToRebound * sin(currentAngle),
+                                                currentTagPose.Z());
 
-                                            if (currentFloorDistance>0){
-                                                //if (obstacleName.compare("FloorStatic)") == 0){
-                                                  // ROS_INFO("TOUCHED GROUND %s - Z: %f", obstacleName.c_str(), z);   
-                                               //}
-                                                
-                                                collisionPoint.Set(currentTagPose.X() + distanceToRebound * cos(currentAngle), currentTagPose.Y() + distanceToRebound * sin(currentAngle), 0.0);
+                                            if (currentFloorDistance > 0)
+                                            {
+                                                collisionPoint.Set(
+                                                    currentTagPose.X() + distanceToRebound * cos(currentAngle),
+                                                    currentTagPose.Y() + distanceToRebound * sin(currentAngle),
+                                                    0.0);
                                             }
 
-                                            //We try to reach the anchor from here
+                                            // 第二道射線：collisionPoint→Anchor
                                             this->secondRay->Reset();
                                             this->secondRay->SetPoints(collisionPoint, anchorPose.Pos());
                                             this->secondRay->GetIntersection(distanceToFinalObstacle, finalObstacleName);
 
                                             if (finalObstacleName.compare("") == 0)
                                             {
-
-
-
-                                                //We reach the anchor after one rebound
                                                 distanceToFinalObstacle = anchorPose.Pos().Distance(collisionPoint);
-
-                                                if (currentFloorDistance>0 ){
-                                                      //ROS_INFO("Rebound in GROUND %s - Distance: %f", obstacleName.c_str(), distanceToFinalObstacle);   
-                                                }
-
-
+                                                // 成功經由一次反射
                                                 if (distanceToRebound + distanceToFinalObstacle <= maxDBDistance)
                                                 {
                                                     foundNlosH = true;
-                                                    //We try to find the shortest rebound
-                                                    if (distanceNlosHard < 0.1)
+                                                    double totalD = distanceToRebound + distanceToFinalObstacle;
+                                                    if (distanceNlosHard < 0.1 || distanceNlosHard > totalD)
                                                     {
-                                                        distanceNlosHard = distanceToRebound + distanceToFinalObstacle;
-                                                    }
-                                                    else if (distanceNlosHard > distanceToRebound + distanceToFinalObstacle)
-                                                    {
-                                                        distanceNlosHard = distanceToRebound + distanceToFinalObstacle;
+                                                        distanceNlosHard = totalD;
                                                     }
                                                 }
                                             }
                                         }
 
+                                        // 繼續掃角 or 結束
                                         if (indexRay < totalNumberAnglesToTest - 1)
                                         {
                                             indexRay += 1;
                                         }
                                         else
                                         {
-                                          if (currentFloorDistance<numStepsFloor){
-
-                                            currentFloorDistance+=1;
-                                            indexRay= 0;
-
-                                          } else {
-                                              end = true;  
-                                          }
-
+                                            if (currentFloorDistance < numStepsFloor)
+                                            {
+                                                currentFloorDistance += 1;
+                                                indexRay = 0;
+                                            }
+                                            else
+                                            {
+                                                end = true;
+                                            }
                                         }
-                                    }
+                                    } // while(!end)
 
                                     if (foundNlosH)
                                     {
-                                        //We use the NLOS Hard Model with distance = distanceNlosHard
                                         losType = NLOS_H;
                                         distanceAfterRebounds = distanceNlosHard;
+                                        ROS_INFO_NAMED("uwb_plugin",
+                                                       "[Tag:%d Anchor:%d - %s] => NLOS_H : Found reflection path. dist=%.3f",
+                                                       this->tagId, aid, anchor->GetName().c_str(),
+                                                       distanceNlosHard);
                                     }
                                     else
                                     {
-                                        //We can not reach the anchor, no ranging.
+                                        // === 新增：印出更多資訊 ===   //debug point
+                                        ROS_INFO_NAMED("uwb_plugin",
+                                                       "[Tag:%d Anchor:%d - %s] => NLOS : No reflection path found\n"
+                                                       "    (distance=%.3f, wallWidth=%.3f, softWall=%.3f)",
+                                                       this->tagId, aid, anchor->GetName().c_str(),
+                                                       distance, wallWidth, this->nlosSoftWallWidth);
                                         losType = NLOS;
                                     }
                                 }
                             }
-
                         }
                         else
                         {
-                            //All beacons are LOS
+                            // 如果參數指定 allBeaconsAreLOS=true，直接 LOS 處理
                             losType = LOS;
                             distanceAfterRebounds = distance;
+                            ROS_INFO_NAMED("uwb_plugin",
+                                           "[Tag:%d Anchor:%d - %s] => LOS : Forcing all anchors to be LOS",
+                                           this->tagId, aid, anchor->GetName().c_str());
                         }
 
+                        // 檢查距離上限
                         if ((losType == LOS || losType == NLOS_S) && distanceAfterRebounds > maxDBDistance)
                         {
+                            // === 新增：印出比較資訊 ===
+                            ROS_INFO_NAMED("uwb_plugin",
+                                           "[Tag:%d Anchor:%d - %s] => NLOS : distanceAfterRebounds=%.3f > maxDBDistance=%.3f",
+                                           this->tagId, aid, anchor->GetName().c_str(),
+                                           distanceAfterRebounds, maxDBDistance);
                             losType = NLOS;
                         }
-
                         if (losType == NLOS_H && distanceAfterRebounds > maxDBDistance)
                         {
+                            // === 新增：印出比較資訊 ===
+                            ROS_INFO_NAMED("uwb_plugin",
+                                           "[Tag:%d Anchor:%d - %s] => NLOS : distanceAfterRebounds=%.3f > maxDBDistance=%.3f (NLOS_H fail)",
+                                           this->tagId, aid, anchor->GetName().c_str(),
+                                           distanceAfterRebounds, maxDBDistance);
                             losType = NLOS;
                         }
 
+                        // 若仍非 NLOS，做雜訊和 RSS 處理
                         if (losType != NLOS)
                         {
-
-                            int indexScenario = 0;
+                            int indexScenario = 0; // 0=LOS,1=NLOS_H,2=NLOS_S
                             if (losType == NLOS_S)
-                            {
                                 indexScenario = 2;
-                            }
                             else if (losType == NLOS_H)
-                            {
                                 indexScenario = 1;
-                            }
 
-                            int indexRangingOffset = (int) round(distanceAfterRebounds / stepDBDistance);
-
+                            // rangingOffset 取值
+                            int indexRangingOffset = (int)round(distanceAfterRebounds / stepDBDistance);
                             double distanceAfterReboundsWithOffset = distanceAfterRebounds;
+
                             if (losType == LOS)
                             {
-                                distanceAfterReboundsWithOffset = distanceAfterRebounds + rangingOffset[indexRangingOffset][0] / 1000.0;
+                                distanceAfterReboundsWithOffset += rangingOffset[indexRangingOffset][0] / 1000.0;
                             }
                             else if (losType == NLOS_S)
                             {
-                                distanceAfterReboundsWithOffset = distanceAfterRebounds + rangingOffset[indexRangingOffset][1] / 1000.0;
+                                distanceAfterReboundsWithOffset += rangingOffset[indexRangingOffset][1] / 1000.0;
                             }
 
                             int indexRanging = (int) round(distanceAfterReboundsWithOffset / stepDBDistance);
 
+                            std::normal_distribution<double> distributionRanging(
+                                distanceAfterReboundsWithOffset * 1000,
+                                rangingStd[indexRanging][indexScenario]);
 
-                            std::normal_distribution<double> distributionRanging(distanceAfterReboundsWithOffset * 1000, rangingStd[indexRanging][indexScenario]);
-                            std::normal_distribution<double> distributionRss(rssMean[indexRanging][indexScenario], rssStd[indexRanging][indexScenario]);
+                            std::normal_distribution<double> distributionRss(
+                                rssMean[indexRanging][indexScenario],
+                                rssStd[indexRanging][indexScenario]);
 
                             double rangingValue = distributionRanging(this->random_generator);
                             double powerValue = distributionRss(this->random_generator);
 
                             if (powerValue < minPower[indexScenario])
                             {
+                                // === 新增：印出 powerValue 與門檻比較
+                                ROS_INFO_NAMED("uwb_plugin",
+                                               "[Tag:%d Anchor:%d - %s] => NLOS : powerValue=%.2f < minPower=%.2f (indexScenario=%d)",
+                                               this->tagId, aid, anchor->GetName().c_str(),
+                                               powerValue, minPower[indexScenario], indexScenario);
                                 losType = NLOS;
                             }
-                            
 
-                            if (losType!=NLOS)
+                            // 最終若仍不是 NLOS，才發布測距
+                            if (losType != NLOS)
                             {
                                 gtec_msgs::Ranging ranging_msg;
                                 ranging_msg.anchorId = aid;
@@ -1070,6 +1188,7 @@ namespace gazebo
                             }
                         }
 
+                        // Marker 顯示
                         visualization_msgs::Marker marker;
                         marker.header.frame_id = "world";
                         marker.header.stamp = ros::Time();
@@ -1114,8 +1233,8 @@ namespace gazebo
                         }
 
                         markerArray.markers.push_back(marker);
-                    }
-                }
+                    } // if (anchorPrefix)
+                }     // for(models)
 
                 this->gtecAnchors.publish(markerArray);
                 this->sequence++;

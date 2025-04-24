@@ -1,0 +1,31 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="uwb_tag_USV">
+    <static>false</static>
+    <link name="link">
+      <gravity>0</gravity> <!-- 🔺 加上這行讓模型不受重力影響 -->
+      <collision name="collision">
+        <geometry>
+          <sphere><radius>0.2</radius></sphere>
+        </geometry>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <sphere><radius>0.2</radius></sphere>
+        </geometry>
+        <material>
+          <ambient>0 0 1 1</ambient>
+          <diffuse>0 0 1 1</diffuse>
+        </material>
+      </visual>
+    </link>
+    <plugin name="gtec_uwb_plugin" filename="libgtec_uwb_plugin.so">
+      <update_rate>25</update_rate>
+      <nlosSoftWallWidth>0.25</nlosSoftWallWidth>
+      <tag_z_offset>0</tag_z_offset>
+      <tag_link>link</tag_link>
+      <anchor_prefix>uwb_tag_UAV</anchor_prefix>
+      <all_los>false</all_los>
+    </plugin>
+  </model>
+</sdf>

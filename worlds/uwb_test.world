@@ -10,37 +10,79 @@
       <uri>model://ground_plane</uri>
     </include>
 
-    <!-- UAV -->
+    <!-- UAV（空中標籤） -->
     <include>
       <uri>model://uwb_tag_UAV</uri>
       <name>uwb_tag_UAV_100</name>
       <pose>0 0 1.0 0 0 0</pose>
     </include>
 
-    <!-- USV -->
+    <!-- USV（水面標籤） -->
     <include>
       <uri>model://uwb_tag_USV</uri>
       <name>uwb_tag_USV_200</name>
       <pose>4 0 1.0 0 0 0</pose>
     </include>
 
-    <!-- 🟧 薄牆 -->
-    <model name="thin_wall">
-      <pose>2 0 1.0 0 0 0</pose>
+    <!-- 🟧 左側薄牆（可以測 NLOS_S） -->
+    <model name="thin_wall_left">
+      <pose>2 1.5 1.0 0 0 0</pose> <!-- 左上角 -->
       <static>true</static>
       <link name="link">
         <collision name="collision">
-          <geometry>
-            <box><size>0.01 1 2</size></box>
-          </geometry>
+          <geometry><box><size>0.01 3 2</size></box></geometry> <!-- 薄 -->
         </collision>
         <visual name="visual">
-          <geometry>
-            <box><size>0.01 1 2</size></box>
-          </geometry>
+          <geometry><box><size>0.01 3 2</size></box></geometry>
           <material><diffuse>1 0.6 0 1</diffuse></material>
         </visual>
       </link>
     </model>
+
+    <!-- 🟧 右側薄牆 -->
+    <model name="thin_wall_right">
+      <pose>2 -1.5 1.0 0 0 0</pose> <!-- 右下角 -->
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.01 3 2</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.01 3 2</size></box></geometry>
+          <material><diffuse>1 0.6 0 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 🟥 前方厚牆（可以產生純 NLOS） -->
+    <model name="thick_wall_front">
+      <pose>5 0 1.0 0 0 0</pose>
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>1.0 3 2</size></box></geometry> <!-- 厚 -->
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.0 3 2</size></box></geometry>
+          <material><diffuse>0.8 0 0 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 🟦 地面上的反射物（測 NLOS_H） -->
+    <model name="reflecting_plate">
+      <pose>3 0 0.05 0 0 0</pose> <!-- 靠近地面 -->
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>1.0 1.0 0.1</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>1.0 1.0 0.1</size></box></geometry>
+          <material><diffuse>0 0.6 1 1</diffuse></material> <!-- 淺藍色代表反射區 -->
+        </visual>
+      </link>
+    </model>
+
   </world>
 </sdf>

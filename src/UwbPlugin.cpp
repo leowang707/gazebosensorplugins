@@ -885,21 +885,39 @@ namespace gazebo
                             const double minOffsetDistance = 0.5;  // 起點偏移 0.5 公尺
                             ignition::math::Vector3d offsetStart = start + direction * minOffsetDistance;
 
-                            // 第一道射線: Tag → Anchor（略微偏移起點，避免誤射自己）
+                            // 第一道射線: Tag → Anchor
                             this->firstRay->Reset();
                             this->firstRay->SetPoints(offsetStart, end);
                             this->firstRay->GetIntersection(distanceToObstacleFromTag, obstacleName);
 
-                            // 加回偏移距離，得到真正從 tag 中心到障礙物的距離
+                            // 加回偏移距離
                             double fullDistanceToObstacleFromTag = (offsetStart - start).Length() + distanceToObstacleFromTag;
 
-                            if (obstacleName.empty())
+                            // [新增] 判斷如果擊中的是自己或 Anchor，不算障礙
+                            bool hitSelfOrAnchor = false;
+
+                            // 取得目前自己的 model 名稱
+                            std::string tagModelName = this->model->GetName();
+                            std::string anchorModelName = anchor->GetName();
+
+                            // 有時候 GetIntersection 會回傳完整名稱，如 model::link::collision，要小心
+                            if (!obstacleName.empty())
+                            {
+                                if (obstacleName.find(tagModelName) != std::string::npos ||
+                                    obstacleName.find(anchorModelName) != std::string::npos)
+                                {
+                                    hitSelfOrAnchor = true;
+                                }
+                            }
+
+                            if (obstacleName.empty() || hitSelfOrAnchor)
                             {
                                 losType = LOS;
                                 distanceAfterRebounds = distance;
                                 ROS_INFO_NAMED("uwb_plugin",
-                                    "[Tag:%d Anchor:%d - %s] => LOS : No obstacle detected",
-                                    this->tagId, aid, anchor->GetName().c_str());
+                                    "[Tag:%d Anchor:%d - %s] => LOS : No obstacle detected (obstacleName=%s hitSelfOrAnchor=%d)",
+                                    this->tagId, aid, anchor->GetName().c_str(),
+                                    obstacleName.c_str(), hitSelfOrAnchor);
                             }
                             else
                             {
@@ -930,44 +948,6 @@ namespace gazebo
                                         this->tagId, aid, anchor->GetName().c_str(),
                                         wallWidth, this->nlosSoftWallWidth);
                                 }
-                            // double distanceToObstacleFromTag;
-                            // std::string obstacleName;
-
-                            // // 第一道射線: Tag→Anchor
-                            // this->firstRay->Reset();
-                            // this->firstRay->SetPoints(tagPose.Pos(), anchorPose.Pos());
-                            // this->firstRay->GetIntersection(distanceToObstacleFromTag, obstacleName);
-
-                            // if (obstacleName.compare("") == 0)
-                            // {
-                            //     losType = LOS;
-                            //     distanceAfterRebounds = distance;
-                            //     ROS_INFO_NAMED("uwb_plugin",
-                            //                    "[Tag:%d Anchor:%d - %s] => LOS : No obstacle detected",
-                            //                    this->tagId, aid, anchor->GetName().c_str());
-                            // }
-                            // else
-                            // {
-                            //     // 第二道射線: Anchor→Tag，以判斷牆厚
-                            //     double distanceToObstacleFromAnchor;
-                            //     std::string otherObstacleName;
-
-                            //     this->secondRay->Reset();
-                            //     this->secondRay->SetPoints(anchorPose.Pos(), tagPose.Pos());
-                            //     this->secondRay->GetIntersection(distanceToObstacleFromAnchor, otherObstacleName);
-
-                            //     double wallWidth = distance - distanceToObstacleFromTag - distanceToObstacleFromAnchor;
-
-                            //     if (wallWidth <= this->nlosSoftWallWidth &&
-                            //         obstacleName.compare(otherObstacleName) == 0)
-                            //     {
-                            //         losType = NLOS_S;
-                            //         distanceAfterRebounds = distance;
-                            //         ROS_INFO_NAMED("uwb_plugin",
-                            //                        "[Tag:%d Anchor:%d - %s] => NLOS_S : Obstacle thickness=%.3f <= softWall=%.3f",
-                            //                        this->tagId, aid, anchor->GetName().c_str(),
-                            //                        wallWidth, this->nlosSoftWallWidth);
-                            //     }
                                 else
                                 {
                                     // === 新增：印出更多資訊 ===   //debug point
@@ -994,6 +974,9 @@ namespace gazebo
                                     double startFloorDistanceCheck = 2;
                                     int numStepsFloor = 6;
 
+                                    std::string tagModelName = this->model->GetName();
+                                    std::string anchorModelName = anchor->GetName();
+
                                     while (!end)
                                     {
                                         double currentAngle = anglesToTest[indexRay];
@@ -1001,15 +984,13 @@ namespace gazebo
                                         double y = currentTagPose.Y() + maxDistance * sin(currentAngle);
                                         double z = currentTagPose.Z();
 
-                                        // 嘗試地面彈跳
+                                        // 地面彈跳模式
                                         if (currentFloorDistance > 0)
                                         {
-                                            double tanAngleFloor = (startFloorDistanceCheck +
-                                                                    stepFloor * (currentFloorDistance - 1))
-                                                                   / currentTagPose.Z();
+                                            double tanAngleFloor = (startFloorDistanceCheck + stepFloor * (currentFloorDistance - 1)) / currentTagPose.Z();
                                             double angleFloor = atan(tanAngleFloor);
                                             double h = sin(angleFloor) * maxDistance;
-                                            double horizontalDistance = sqrt(maxDistance*maxDistance - h*h);
+                                            double horizontalDistance = sqrt(maxDistance * maxDistance - h * h);
 
                                             x = currentTagPose.X() + horizontalDistance * cos(currentAngle);
                                             y = currentTagPose.Y() + horizontalDistance * sin(currentAngle);
@@ -1022,37 +1003,67 @@ namespace gazebo
                                         this->firstRay->SetPoints(currentTagPose, rayPoint);
                                         this->firstRay->GetIntersection(distanceToRebound, obstacleName);
 
-                                        if (obstacleName.compare("") != 0)
+                                        if (!obstacleName.empty())
                                         {
-                                            ignition::math::Vector3d collisionPoint(
-                                                currentTagPose.X() + distanceToRebound * cos(currentAngle),
-                                                currentTagPose.Y() + distanceToRebound * sin(currentAngle),
-                                                currentTagPose.Z());
-
-                                            if (currentFloorDistance > 0)
+                                            // 避免射到自己或Anchor
+                                            if (obstacleName.find(tagModelName) != std::string::npos ||
+                                                obstacleName.find(anchorModelName) != std::string::npos)
                                             {
-                                                collisionPoint.Set(
-                                                    currentTagPose.X() + distanceToRebound * cos(currentAngle),
-                                                    currentTagPose.Y() + distanceToRebound * sin(currentAngle),
-                                                    0.0);
+                                                // 撞到自己或anchor，略過
                                             }
-
-                                            // 第二道射線：collisionPoint→Anchor
-                                            this->secondRay->Reset();
-                                            this->secondRay->SetPoints(collisionPoint, anchorPose.Pos());
-                                            this->secondRay->GetIntersection(distanceToFinalObstacle, finalObstacleName);
-
-                                            if (finalObstacleName.compare("") == 0)
+                                            else
                                             {
-                                                distanceToFinalObstacle = anchorPose.Pos().Distance(collisionPoint);
-                                                // 成功經由一次反射
-                                                if (distanceToRebound + distanceToFinalObstacle <= maxDBDistance)
+                                                // 碰撞點
+                                                ignition::math::Vector3d collisionPoint(
+                                                    currentTagPose.X() + distanceToRebound * (rayPoint.X() - currentTagPose.X()) / maxDistance,
+                                                    currentTagPose.Y() + distanceToRebound * (rayPoint.Y() - currentTagPose.Y()) / maxDistance,
+                                                    currentTagPose.Z() + distanceToRebound * (rayPoint.Z() - currentTagPose.Z()) / maxDistance
+                                                );
+
+                                                if (currentFloorDistance > 0)
                                                 {
-                                                    foundNlosH = true;
-                                                    double totalD = distanceToRebound + distanceToFinalObstacle;
-                                                    if (distanceNlosHard < 0.1 || distanceNlosHard > totalD)
+                                                    collisionPoint.Z() = 0.0;
+                                                }
+
+                                                // 假設地面是 (0,0,1)，牆壁是 (1,0,0) 或 (0,1,0)
+                                                ignition::math::Vector3d normal(0, 0, 1); // 預設地面
+                                                if (currentFloorDistance == 0)
+                                                {
+                                                    // 假設牆壁垂直（用初始射線推測normal）
+                                                    ignition::math::Vector3d incident = (rayPoint - currentTagPose).Normalize();
+                                                    if (fabs(incident.X()) > fabs(incident.Y()))
+                                                        normal = ignition::math::Vector3d(1, 0, 0);
+                                                    else
+                                                        normal = ignition::math::Vector3d(0, 1, 0);
+                                                }
+
+                                                // 計算反射向量
+                                                ignition::math::Vector3d incidentDir = (collisionPoint - currentTagPose).Normalize();
+                                                ignition::math::Vector3d reflectDir = incidentDir - 2 * (incidentDir.Dot(normal)) * normal;
+                                                reflectDir = reflectDir.Normalize();
+
+                                                // 新目標點 (從碰撞點往反射方向延伸)
+                                                ignition::math::Vector3d newTarget = collisionPoint + reflectDir * maxDistance;
+
+                                                this->secondRay->Reset();
+                                                this->secondRay->SetPoints(collisionPoint, newTarget);
+                                                this->secondRay->GetIntersection(distanceToFinalObstacle, finalObstacleName);
+
+                                                if (!finalObstacleName.empty())
+                                                {
+                                                    if (finalObstacleName.find(anchorModelName) != std::string::npos)
                                                     {
-                                                        distanceNlosHard = totalD;
+                                                        distanceToFinalObstacle = collisionPoint.Distance(anchorPose.Pos());
+
+                                                        if (distanceToRebound + distanceToFinalObstacle <= maxDBDistance)
+                                                        {
+                                                            foundNlosH = true;
+                                                            double totalD = distanceToRebound + distanceToFinalObstacle;
+                                                            if (distanceNlosHard < 0.1 || distanceNlosHard > totalD)
+                                                            {
+                                                                distanceNlosHard = totalD;
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1075,7 +1086,7 @@ namespace gazebo
                                                 end = true;
                                             }
                                         }
-                                    } // while(!end)
+                                    }
 
                                     if (foundNlosH)
                                     {
